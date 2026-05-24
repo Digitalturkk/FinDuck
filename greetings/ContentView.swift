@@ -7,14 +7,15 @@
 
 import SwiftUI
 import UIKit
+import LocalAuthentication
 
-struct Transaction: Identifiable, Hashable {
-    enum Kind: String, CaseIterable, Identifiable { case income = "Income", expense = "Expense"; var id: String { rawValue } }
-    enum Category: String, CaseIterable, Identifiable {
+struct Transaction: Identifiable, Hashable, Codable {
+    enum Kind: String, CaseIterable, Identifiable, Codable { case income = "Income", expense = "Expense"; var id: String { rawValue } }
+    enum Category: String, CaseIterable, Identifiable, Codable {
         case groceries = "Groceries", rent = "Rent", utilities = "Utilities", transport = "Transport", dining = "Dining", entertainment = "Entertainment", salary = "Salary", other = "Other"
         var id: String { rawValue }
     }
-    let id = UUID()
+    var id: UUID = UUID()
     var title: String
     var amount: Double
     var date: Date
@@ -23,10 +24,7 @@ struct Transaction: Identifiable, Hashable {
 }
 
 struct ContentView: View {
-    @State private var transactions: [Transaction] = [
-        Transaction(title: "Salary", amount: 1500, date: .now, kind: .income, category: .salary),
-        Transaction(title: "Groceries", amount: 120.45, date: .now, kind: .expense, category: .groceries)
-    ]
+    @State private var transactions: [Transaction]
     
     enum Filter: String, CaseIterable, Identifiable { case all = "All", income = "Income", expense = "Expenses"; var id: String { rawValue } }
     @State private var selectedFilter: Filter = .all
@@ -48,6 +46,13 @@ struct ContentView: View {
     @State private var selectedDesign: Design = .system
     @State private var showSettings: Bool = false
 
+    @State private var useFaceID: Bool
+    @State private var isUnlocked: Bool
+    @State private var requiresAuthentication: Bool
+    @State private var authErrorMessage: String? = nil
+
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var newTitle: String = ""
     @State private var newAmount: String = ""
     @State private var newKind: Transaction.Kind = .expense
@@ -64,9 +69,96 @@ struct ContentView: View {
     @State private var editCategory: Transaction.Category = .other
     @State private var editDate: Date = .now
 
+    private static let selectedThemeKey = "selectedTheme"
+    private static let selectedDesignKey = "selectedDesign"
+    private static let faceIDEnabledKey = "faceIDEnabled"
+
+    init() {
+        _transactions = State(initialValue: Self.loadTransactions())
+        _selectedTheme = State(initialValue: Self.loadTheme())
+        _selectedDesign = State(initialValue: Self.loadDesign())
+        let faceIDEnabled = Self.loadFaceIDEnabled()
+        _useFaceID = State(initialValue: faceIDEnabled)
+        _isUnlocked = State(initialValue: !faceIDEnabled)
+        _requiresAuthentication = State(initialValue: faceIDEnabled)
+    }
+
+    private static func defaultTransactions() -> [Transaction] {
+        [
+            Transaction(title: "Salary", amount: 1500, date: .now, kind: .income, category: .salary),
+            Transaction(title: "Groceries", amount: 120.45, date: .now, kind: .expense, category: .groceries)
+        ]
+    }
+
+    private static func storageURL() -> URL {
+        let baseDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDirectory = baseDirectory.appendingPathComponent(Bundle.main.bundleIdentifier ?? "greeting", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: appDirectory.path) {
+            try? FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+        }
+        return appDirectory.appendingPathComponent("transactions.json")
+    }
+
+    private static func loadTransactions() -> [Transaction] {
+        let url = storageURL()
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            let defaults = defaultTransactions()
+            saveTransactions(defaults)
+            return defaults
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            return []
+        }
+
+        do {
+            return try JSONDecoder().decode([Transaction].self, from: data)
+        } catch {
+            print("Failed to load transactions: \(error)")
+            return []
+        }
+    }
+
+    private static func loadTheme() -> Theme {
+        Theme(rawValue: UserDefaults.standard.string(forKey: selectedThemeKey) ?? "") ?? .system
+    }
+
+    private static func loadDesign() -> Design {
+        Design(rawValue: UserDefaults.standard.string(forKey: selectedDesignKey) ?? "") ?? .system
+    }
+
+    private static func saveTransactions(_ transactions: [Transaction]) {
+        let url = storageURL()
+        do {
+            let data = try JSONEncoder().encode(transactions)
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            print("Failed to save transactions: \(error)")
+        }
+    }
+
+    private static func saveTheme(_ theme: Theme) {
+        UserDefaults.standard.set(theme.rawValue, forKey: selectedThemeKey)
+    }
+
+    private static func saveDesign(_ design: Design) {
+        UserDefaults.standard.set(design.rawValue, forKey: selectedDesignKey)
+    }
+
+    private static func loadFaceIDEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: faceIDEnabledKey)
+    }
+
+    private static func saveFaceIDEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: faceIDEnabledKey)
+    }
+
     private var totalIncome: Double { transactions.filter { $0.kind == .income }.reduce(0) { $0 + $1.amount } }
     private var totalExpenses: Double { transactions.filter { $0.kind == .expense }.reduce(0) { $0 + $1.amount } }
     private var balance: Double { totalIncome - totalExpenses }
+
+    private var shouldBlurAmounts: Bool {
+        useFaceID && !isUnlocked
+    }
     
     private var filteredTransactions: [Transaction] {
         let byKind: [Transaction]
@@ -88,16 +180,22 @@ struct ContentView: View {
                 backgroundGradient
                     .ignoresSafeArea()
                 VStack(spacing: 12) {
+                    summaryCard
                     HStack {
                         filterControl
                         Spacer(minLength: 12)
-                        categoryFilterControl
                     }
-                    summaryCard
+                    categoryFilterControl
                     listSection
                 }
+                .foregroundColor(designTextColor(.primary))
                         .padding()
                             }
+            .overlay {
+                if useFaceID && !isUnlocked {
+                    lockOverlay
+                }
+            }
                                     .preferredColorScheme(selectedTheme == .system ? nil : (selectedTheme == .light ? .light : .dark))
                                     .navigationTitle("")
             .toolbar {
@@ -107,11 +205,11 @@ struct ContentView: View {
                     if selectedDesign == .sydney {
                         // Try to use a custom 'Satisfy' font if provided, otherwise fall back to rounded system
                         if UIFont(name: "Satisfy", size: 30) != nil {
-                            Text("FinDuck")
+                            Text("FinSweeney")
                                 .font(.custom("Satisfy", size: 30))
                                 .foregroundColor(titleColor)
                         } else {
-                            Text("FinDuck")
+                            Text("FinSweeney")
                                 .font(.system(size: 30, weight: .heavy, design: .rounded))
                                 .foregroundColor(titleColor)
                         }
@@ -151,6 +249,23 @@ struct ContentView: View {
             .sheet(isPresented: $showAddForm) { addTransactionSheet }
             .sheet(isPresented: $showEditForm) { editTransactionSheet }
             .sheet(isPresented: $showSettings) { settingsSheet }
+        }
+        .onAppear {
+            if useFaceID, requiresAuthentication {
+                isUnlocked = false
+                requiresAuthentication = false
+                authenticateWithFaceID()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background || phase == .inactive {
+                requiresAuthentication = useFaceID
+            }
+            if phase == .active, useFaceID, requiresAuthentication {
+                isUnlocked = false
+                requiresAuthentication = false
+                authenticateWithFaceID()
+            }
         }
     }
     private var filterControl: some View {
@@ -235,6 +350,29 @@ struct ContentView: View {
                         .pickerStyle(.segmented)
                     }
 
+                    Section("Security") {
+                        Toggle("Face ID", isOn: $useFaceID)
+                            .disabled(!faceIDAvailable)
+                            .onChange(of: useFaceID) { _, enabled in
+                                Self.saveFaceIDEnabled(enabled)
+                                authErrorMessage = nil
+                                if enabled {
+                                    isUnlocked = false
+                                    requiresAuthentication = true
+                                    authenticateWithFaceID()
+                                } else {
+                                    isUnlocked = true
+                                    requiresAuthentication = false
+                                }
+                            }
+
+                        if !faceIDAvailable {
+                            Text("Face ID is not available on this device.")
+                                .font(.footnote)
+                                .foregroundStyle(designTextColor(.secondary))
+                        }
+                    }
+
                     Section("Design") {
                         Picker("Design", selection: $selectedDesign) {
                             ForEach(Design.allCases) { d in
@@ -269,14 +407,19 @@ struct ContentView: View {
                     }
                 }
                 .scrollContentBackground(.hidden)
+                .foregroundColor(designTextColor(.primary))
                 .tint(accentColor(for: selectedDesign))
             }
             .safeAreaInset(edge: .bottom) {
                 Text("Make with ❤️ by DigitalTurkk")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(designTextColor(.secondary))
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 12)
+            }
+            .onDisappear {
+                Self.saveTheme(selectedTheme)
+                Self.saveDesign(selectedDesign)
             }
             .navigationTitle("Settings")
             .toolbar {
@@ -313,7 +456,85 @@ struct ContentView: View {
     }
 
     // Theme-aware text color helper
+    private var forcesWhiteText: Bool {
+        switch selectedDesign {
+        case .darkGreen, .blue, .red:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var faceIDAvailable: Bool {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+            return false
+        }
+        return context.biometryType == .faceID
+    }
+
+    private func authenticateWithFaceID() {
+        guard faceIDAvailable else {
+            isUnlocked = true
+            useFaceID = false
+            requiresAuthentication = false
+            Self.saveFaceIDEnabled(false)
+            authErrorMessage = "Face ID is not available on this device."
+            return
+        }
+
+        let context = LAContext()
+        context.localizedCancelTitle = "Cancel"
+        let reason = "Unlock FinDuck with Face ID."
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    isUnlocked = true
+                    authErrorMessage = nil
+                } else {
+                    isUnlocked = false
+                    authErrorMessage = error?.localizedDescription ?? "Face ID authentication failed."
+                }
+            }
+        }
+    }
+
+    private var lockOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.25)
+                .ignoresSafeArea()
+            VStack(spacing: 12) {
+                Image(systemName: "lock.fill")
+                    .font(.title2)
+                Text("Face ID Required")
+                    .font(.headline)
+                if let authErrorMessage {
+                    Text(authErrorMessage)
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(designTextColor(.secondary))
+                }
+                Button("Unlock") {
+                    authenticateWithFaceID()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(accentColor(for: selectedDesign))
+            }
+            .padding(20)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding()
+        }
+    }
+
+    private func designTextColor(_ color: Color) -> Color {
+        forcesWhiteText ? .white : color
+    }
+
     private func themedTextColor() -> Color {
+        if forcesWhiteText {
+            return .white
+        }
         switch selectedTheme {
         case .dark: return .white
         case .light: return .black
@@ -342,7 +563,7 @@ struct ContentView: View {
                 Spacer()
                 Label(balance >= 0 ? "On track" : "Over budget", systemImage: balance >= 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .font(.footnote)
-                    .foregroundStyle(balance >= 0 ? .green : .orange)
+                    .foregroundStyle(designTextColor(balance >= 0 ? .green : .orange))
             }
             HStack(spacing: 16) {
                 Button {
@@ -363,18 +584,23 @@ struct ContentView: View {
                 VStack(alignment: .leading) {
                     Text("Balance")
                         .font(.caption)
-                        .foregroundColor(themedTextColor().opacity(0.75))
+                        .foregroundColor(forcesWhiteText ? .white : themedTextColor().opacity(0.75))
                     Text(balance, format: .currency(code: Locale.current.currency?.identifier ?? "USD"))
                         .font(.title3).bold()
-                        .foregroundColor(balance >= 0 ? themedTextColor() : Color.orange)
+                        .foregroundColor(forcesWhiteText ? .white : (balance >= 0 ? themedTextColor() : Color.orange))
+                        .blur(radius: shouldBlurAmounts ? 8 : 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            let ratio = max(0, min(1, totalIncome == 0 ? 0 : (totalIncome - totalExpenses) / max(totalIncome, 1)))
-            ProgressView(value: ratio) {
+            .zIndex(2)
+            let usageRatio: Double = {
+                guard totalIncome > 0 else { return totalExpenses > 0 ? 1 : 0 }
+                return max(0, min(1, totalExpenses / totalIncome))
+            }()
+            ProgressView(value: usageRatio) {
                 Text("Budget usage")
             } currentValueLabel: {
-                Text(((1 - ratio) * 100), format: .percent.precision(.fractionLength(0)))
+                Text(usageRatio, format: .percent.precision(.fractionLength(0)))
             }
             .tint(balance >= 0 ? .green : .orange)
         }
@@ -397,13 +623,17 @@ struct ContentView: View {
                         .allowsHitTesting(false)
                 }
             }
+            .allowsHitTesting(false)
         )
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.05))
+                .allowsHitTesting(false)
         )
         .shadow(color: Color.black.opacity(0.06), radius: 8, x: 0, y: 4)
+        .zIndex(10)
     }
 
     private var chartTheme: ChartTheme {
@@ -425,10 +655,11 @@ struct ContentView: View {
             Label(title, systemImage: symbol)
                 .font(.caption)
                 .labelStyle(.titleAndIcon)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(designTextColor(.secondary))
             Text(value, format: .currency(code: Locale.current.currency?.identifier ?? "USD"))
                 .font(.headline)
-                .foregroundStyle(color)
+                .foregroundStyle(designTextColor(color))
+                .blur(radius: shouldBlurAmounts ? 8 : 0)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -449,10 +680,12 @@ struct ContentView: View {
                     Image(systemName: "tray")
                         .font(.largeTitle)
                         .foregroundStyle(.secondary)
-                    Text("No Transactions").font(.headline)
+                    Text("No Transactions")
+                        .font(.headline)
+                        .foregroundColor(designTextColor(.primary))
                     Text("Tap + to add your first income or expense.")
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(designTextColor(.secondary))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -487,7 +720,7 @@ struct ContentView: View {
                                             .foregroundColor(themedTextColor())
                                         Text(tx.date, style: .date)
                                             .font(.caption)
-                                            .foregroundColor(themedTextColor().opacity(0.8))
+                                            .foregroundColor(forcesWhiteText ? .white : themedTextColor().opacity(0.8))
                                         Text(tx.category.rawValue)
                                             .font(.caption2)
                                             .foregroundColor(themedTextColor())
@@ -499,7 +732,8 @@ struct ContentView: View {
                                     VStack(alignment: .trailing, spacing: 6) {
                                         Text((tx.kind == .expense ? -tx.amount : tx.amount), format: .currency(code: Locale.current.currency?.identifier ?? "USD"))
                                             .fontWeight(.semibold)
-                                            .foregroundStyle(tx.kind == .expense ? .red : .green)
+                                            .foregroundStyle(designTextColor(tx.kind == .expense ? .red : .green))
+                                            .blur(radius: shouldBlurAmounts ? 8 : 0)
                                         Button {
                                             beginEdit(tx)
                                         } label: {
@@ -534,22 +768,45 @@ struct ContentView: View {
 
     private var addTransactionSheet: some View {
         NavigationStack {
-            Form {
-                Section("Details") {
-                    TextField("Title (e.g., Rent)", text: $newTitle)
-                    TextField("Amount", text: $newAmount)
-                        .keyboardType(.decimalPad)
-                    Picker("Type", selection: $newKind) {
-                        ForEach(Transaction.Kind.allCases) { kind in
-                            Text(kind.rawValue).tag(kind)
-                        }
-                    }
-                    Picker("Category", selection: $newCategory) {
-                        ForEach(Transaction.Category.allCases) { cat in
-                            Text(cat.rawValue).tag(cat)
+            ZStack {
+                backgroundGradient
+                    .ignoresSafeArea()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if selectedDesign == .sydney {
+                    GeometryReader { proxy in
+                        if let ui = UIImage(named: "sydney2") {
+                            Image(uiImage: ui)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: proxy.size.width, height: proxy.size.height)
+                                .opacity(0.35)
+                                .clipped()
+                                .ignoresSafeArea()
+                                .allowsHitTesting(false)
                         }
                     }
                 }
+                Form {
+                    Section("Details") {
+                        TextField("Title (e.g., Rent)", text: $newTitle)
+                        TextField("Amount", text: $newAmount)
+                            .keyboardType(.decimalPad)
+                        Picker("Type", selection: $newKind) {
+                            ForEach(Transaction.Kind.allCases) { kind in
+                                Text(kind.rawValue).tag(kind)
+                            }
+                        }
+                        Picker("Category", selection: $newCategory) {
+                            ForEach(Transaction.Category.allCases) { cat in
+                                Text(cat.rawValue).tag(cat)
+                            }
+                        }
+                    }
+                }
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .foregroundColor(designTextColor(.primary))
+                .tint(accentColor(for: selectedDesign))
             }
             .navigationTitle("New Transaction")
             .toolbar {
@@ -607,6 +864,7 @@ struct ContentView: View {
         guard let amount = Double(newAmount.replacingOccurrences(of: ",", with: ".")), amount > 0 else { return }
         let tx = Transaction(title: newTitle.trimmingCharacters(in: .whitespacesAndNewlines), amount: amount, date: .now, kind: newKind, category: newCategory)
         transactions.insert(tx, at: 0)
+        Self.saveTransactions(transactions)
         resetForm()
         showAddForm = false
     }
@@ -636,6 +894,7 @@ struct ContentView: View {
             transactions[idx].kind = editKind
             transactions[idx].category = editCategory
             transactions[idx].date = editDate
+            Self.saveTransactions(transactions)
         }
         cancelEdit()
     }
@@ -650,7 +909,13 @@ struct ContentView: View {
         editDate = .now
     }
 
-    private func delete(at offsets: IndexSet) { transactions.remove(atOffsets: offsets) }
+    private func delete(at offsets: IndexSet) {
+        let idsToDelete = Set(offsets.compactMap { index in
+            filteredTransactions.indices.contains(index) ? filteredTransactions[index].id : nil
+        })
+        transactions.removeAll { idsToDelete.contains($0.id) }
+        Self.saveTransactions(transactions)
+    }
 
     private func resetForm() {
         newTitle = ""
