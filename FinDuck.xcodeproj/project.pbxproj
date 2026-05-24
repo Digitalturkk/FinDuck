@@ -266,6 +266,8 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = a.greeting;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = DigitalTurkk;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]" = DigitalTurkk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -308,6 +310,8 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = a.greeting;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = DigitalTurkk;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]" = DigitalTurkk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
