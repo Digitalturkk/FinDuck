@@ -8,6 +8,7 @@
 import SwiftUI
 import UIKit
 import LocalAuthentication
+import PhotosUI
 
 struct Transaction: Identifiable, Hashable, Codable {
     enum Kind: String, CaseIterable, Identifiable, Codable { case income = "Income", expense = "Expense"; var id: String { rawValue } }
@@ -23,8 +24,41 @@ struct Transaction: Identifiable, Hashable, Codable {
     var category: Category
 }
 
+struct UserProfile: Codable, Hashable {
+    var displayName: String
+    var email: String
+    var bio: String
+    var photoData: Data?
+}
+
+struct GoalItem: Identifiable, Hashable, Codable {
+    var id: UUID = UUID()
+    var title: String
+    var targetAmount: Double
+    var currentAmount: Double
+    var dueDate: Date
+    var notes: String
+    var isCompleted: Bool
+
+    var progress: Double {
+        guard targetAmount > 0 else { return isCompleted ? 1 : 0 }
+        return min(max(currentAmount / targetAmount, 0), 1)
+    }
+}
+
+struct AchievementItem: Identifiable, Hashable, Codable {
+    var id: UUID = UUID()
+    var title: String
+    var iconName: String
+    var achievedOn: Date
+    var notes: String
+}
+
 struct ContentView: View {
     @State private var transactions: [Transaction]
+    @State private var goals: [GoalItem]
+    @State private var achievements: [AchievementItem]
+    @State private var profile: UserProfile
     
     enum Filter: String, CaseIterable, Identifiable { case all = "All", income = "Income", expense = "Expenses"; var id: String { rawValue } }
     @State private var selectedFilter: Filter = .all
@@ -45,6 +79,9 @@ struct ContentView: View {
     }
     @State private var selectedDesign: Design = .system
     @State private var showSettings: Bool = false
+    @State private var showHistorySheet: Bool = false
+    @State private var showGoalsSheet: Bool = false
+    @State private var transactionSearchText: String = ""
 
     @State private var useFaceID: Bool
     @State private var isUnlocked: Bool
@@ -69,12 +106,37 @@ struct ContentView: View {
     @State private var editCategory: Transaction.Category = .other
     @State private var editDate: Date = .now
 
+    @State private var showProfileEditSheet: Bool = false
+    @State private var profilePhotoPickerItem: PhotosPickerItem? = nil
+    @State private var profileDisplayName: String = ""
+    @State private var profileEmail: String = ""
+    @State private var profileBio: String = ""
+
+    @State private var showGoalForm: Bool = false
+    @State private var editingGoal: GoalItem? = nil
+    @State private var goalTitle: String = ""
+    @State private var goalTargetAmount: String = ""
+    @State private var goalCurrentAmount: String = ""
+    @State private var goalDueDate: Date = .now
+    @State private var goalNotes: String = ""
+    @State private var goalIsCompleted: Bool = false
+
+    @State private var showAchievementForm: Bool = false
+    @State private var editingAchievement: AchievementItem? = nil
+    @State private var achievementTitle: String = ""
+    @State private var achievementIconName: String = "trophy.fill"
+    @State private var achievementDate: Date = .now
+    @State private var achievementNotes: String = ""
+
     private static let selectedThemeKey = "selectedTheme"
     private static let selectedDesignKey = "selectedDesign"
     private static let faceIDEnabledKey = "faceIDEnabled"
 
     init() {
         _transactions = State(initialValue: Self.loadTransactions())
+        _goals = State(initialValue: Self.loadGoals())
+        _achievements = State(initialValue: Self.loadAchievements())
+        _profile = State(initialValue: Self.loadProfile())
         _selectedTheme = State(initialValue: Self.loadTheme())
         _selectedDesign = State(initialValue: Self.loadDesign())
         let faceIDEnabled = Self.loadFaceIDEnabled()
@@ -90,6 +152,14 @@ struct ContentView: View {
         ]
     }
 
+    private static func defaultGoals() -> [GoalItem] { [] }
+
+    private static func defaultAchievements() -> [AchievementItem] { [] }
+
+    private static func defaultProfile() -> UserProfile {
+        UserProfile(displayName: "Farid", email: "", bio: "Track money, goals, and progress in one place.", photoData: nil)
+    }
+
     private static func storageURL() -> URL {
         let baseDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDirectory = baseDirectory.appendingPathComponent(Bundle.main.bundleIdentifier ?? "greeting", isDirectory: true)
@@ -97,6 +167,19 @@ struct ContentView: View {
             try? FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
         }
         return appDirectory.appendingPathComponent("transactions.json")
+    }
+
+    private static func appSupportDirectory() -> URL {
+        let baseDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDirectory = baseDirectory.appendingPathComponent(Bundle.main.bundleIdentifier ?? "greeting", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: appDirectory.path) {
+            try? FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+        }
+        return appDirectory
+    }
+
+    private static func fileURL(_ name: String) -> URL {
+        appSupportDirectory().appendingPathComponent(name)
     }
 
     private static func loadTransactions() -> [Transaction] {
@@ -118,6 +201,18 @@ struct ContentView: View {
         }
     }
 
+    private static func loadGoals() -> [GoalItem] {
+        loadCodable([GoalItem].self, fileName: "goals.json", defaultValue: defaultGoals())
+    }
+
+    private static func loadAchievements() -> [AchievementItem] {
+        loadCodable([AchievementItem].self, fileName: "achievements.json", defaultValue: defaultAchievements())
+    }
+
+    private static func loadProfile() -> UserProfile {
+        loadCodable(UserProfile.self, fileName: "profile.json", defaultValue: defaultProfile())
+    }
+
     private static func loadTheme() -> Theme {
         Theme(rawValue: UserDefaults.standard.string(forKey: selectedThemeKey) ?? "") ?? .system
     }
@@ -133,6 +228,43 @@ struct ContentView: View {
             try data.write(to: url, options: [.atomic])
         } catch {
             print("Failed to save transactions: \(error)")
+        }
+    }
+
+    private static func saveGoals(_ goals: [GoalItem]) {
+        saveCodable(goals, fileName: "goals.json")
+    }
+
+    private static func saveAchievements(_ achievements: [AchievementItem]) {
+        saveCodable(achievements, fileName: "achievements.json")
+    }
+
+    private static func saveProfile(_ profile: UserProfile) {
+        saveCodable(profile, fileName: "profile.json")
+    }
+
+    private static func loadCodable<T: Codable>(_ type: T.Type, fileName: String, defaultValue: T) -> T {
+        let url = fileURL(fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            saveCodable(defaultValue, fileName: fileName)
+            return defaultValue
+        }
+        guard let data = try? Data(contentsOf: url) else { return defaultValue }
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            print("Failed to load \(fileName): \(error)")
+            return defaultValue
+        }
+    }
+
+    private static func saveCodable<T: Codable>(_ value: T, fileName: String) {
+        let url = fileURL(fileName)
+        do {
+            let data = try JSONEncoder().encode(value)
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            print("Failed to save \(fileName): \(error)")
         }
     }
 
@@ -172,6 +304,29 @@ struct ContentView: View {
         } else {
             return byKind
         }
+    }
+
+    private var sortedTransactions: [Transaction] {
+        transactions.sorted { $0.date > $1.date }
+    }
+
+    private var historyTransactions: [Transaction] {
+        let query = transactionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return sortedTransactions }
+        return sortedTransactions.filter { tx in
+            tx.title.localizedCaseInsensitiveContains(query) ||
+            tx.category.rawValue.localizedCaseInsensitiveContains(query) ||
+            tx.kind.rawValue.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var completedGoalsCount: Int {
+        goals.filter { $0.isCompleted || $0.progress >= 1 }.count
+    }
+
+    private var goalProgressAverage: Double {
+        guard !goals.isEmpty else { return 0 }
+        return goals.reduce(0) { $0 + $1.progress } / Double(goals.count)
     }
 
     var body: some View {
@@ -219,36 +374,37 @@ struct ContentView: View {
                             .foregroundColor(titleColor)
                     }
                 }
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Button {
-                        showSettings = true
-                    } label: {
-                        Label("Settings", systemImage: "gearshape.fill")
-                    }
-                    .accessibilityLabel("Settings")
-
-                    Spacer()
-
-                    Button {
-                        showAddForm = true
-                    } label: {
-                        Label("Add", systemImage: "plus.circle.fill")
-                    }
-                    .accessibilityIdentifier("add-transaction")
-
-                    Spacer()
-
+                ToolbarItem(placement: .topBarLeading) {
                     NavigationLink {
                         InsightsView(transactions: transactions, theme: chartTheme)
                     } label: {
-                        Label("Insights", systemImage: "chart.xyaxis.line")
+                        Image(systemName: "chart.xyaxis.line")
                     }
                     .accessibilityLabel("Insights")
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                bottomBar
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                    .padding(.bottom, 8)
             }
             .sheet(isPresented: $showAddForm) { addTransactionSheet }
             .sheet(isPresented: $showEditForm) { editTransactionSheet }
             .sheet(isPresented: $showSettings) { settingsSheet }
+            .sheet(isPresented: $showHistorySheet) { historySheet }
+            .sheet(isPresented: $showGoalsSheet) { goalsSheet }
+            .sheet(isPresented: $showProfileEditSheet) { profileSheet }
+            .sheet(isPresented: $showGoalForm) { goalSheet }
+            .sheet(isPresented: $showAchievementForm) { achievementSheet }
         }
         .onAppear {
             if useFaceID, requiresAuthentication {
@@ -268,6 +424,270 @@ struct ContentView: View {
             }
         }
     }
+    private var bottomBar: some View {
+        HStack(spacing: 8) {
+            barButton(title: "History", symbol: "clock.arrow.circlepath") {
+                showHistorySheet = true
+            }
+
+            barButton(title: "Goals", symbol: "target") {
+                showGoalsSheet = true
+            }
+
+            Button {
+                showAddForm = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 18, weight: .bold))
+                    .frame(width: 48, height: 48)
+                    .foregroundStyle(.white)
+                    .background(accentColor(for: selectedDesign), in: Circle())
+                    .shadow(color: accentColor(for: selectedDesign).opacity(0.35), radius: 8, x: 0, y: 5)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Add transaction")
+
+            barButton(title: "Profile", symbol: "person.crop.circle.fill") {
+                loadProfileEditor()
+                showProfileEditSheet = true
+            }
+
+            barButton(title: "Settings", symbol: "gearshape.fill") {
+                showSettings = true
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color.primary.opacity(0.06)))
+        .shadow(color: Color.black.opacity(0.10), radius: 10, x: 0, y: 6)
+    }
+
+    private func barButton(title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: symbol)
+                    .font(.system(size: 16, weight: .semibold))
+                Text(title)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .foregroundStyle(designTextColor(.primary))
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var historySheet: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                TextField("Search transactions", text: $transactionSearchText)
+                    .textFieldStyle(.roundedBorder)
+
+                if historyTransactions.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "tray")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text("No Transactions")
+                            .font(.headline)
+                        Text("Try a different search or add a new transaction.")
+                            .font(.subheadline)
+                            .foregroundStyle(designTextColor(.secondary))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(historyTransactions) { tx in
+                            transactionRow(tx)
+                                .listRowBackground(Color.clear)
+                                .contentShape(Rectangle())
+                                .onTapGesture { beginEdit(tx) }
+                        }
+                        .onDelete { offsets in
+                            deleteTransactions(at: offsets, from: historyTransactions)
+                        }
+                    }
+                    .scrollContentBackground(.hidden)
+                    .listStyle(.plain)
+                }
+            }
+            .padding()
+            .navigationTitle("Transaction History")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { showHistorySheet = false }
+                }
+            }
+        }
+    }
+
+    private var goalsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Goals")
+                                .font(.headline)
+                            Spacer()
+                            Button {
+                                prepareNewGoal()
+                                showGoalForm = true
+                            } label: {
+                                Label("Add Goal", systemImage: "plus.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+
+                        if goals.isEmpty {
+                            Text("No goals yet. Add your first savings target.")
+                                .font(.footnote)
+                                .foregroundStyle(designTextColor(.secondary))
+                        } else {
+                            VStack(spacing: 12) {
+                                ForEach(goals) { goal in
+                                    goalRow(goal)
+                                }
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Achievements")
+                                .font(.headline)
+                            Spacer()
+                            Button {
+                                prepareNewAchievement()
+                                showAchievementForm = true
+                            } label: {
+                                Label("Add Achievement", systemImage: "plus.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+
+                        if achievements.isEmpty {
+                            Text("No achievements yet. Add one or unlock one by reaching a goal.")
+                                .font(.footnote)
+                                .foregroundStyle(designTextColor(.secondary))
+                        } else {
+                            VStack(spacing: 12) {
+                                ForEach(achievements) { achievement in
+                                    achievementRow(achievement)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding()
+            .navigationTitle("Goals")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { showGoalsSheet = false }
+                }
+            }
+        }
+    }
+
+    private var profileSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Preview") {
+                    HStack(spacing: 12) {
+                        profileAvatar
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(profile.displayName.isEmpty ? "Your Profile" : profile.displayName)
+                                .font(.headline)
+                            if !profile.email.isEmpty {
+                                Text(profile.email)
+                                    .font(.caption)
+                                    .foregroundStyle(designTextColor(.secondary))
+                            }
+                        }
+                    }
+                }
+
+                Section("Profile") {
+                    TextField("Display name", text: $profileDisplayName)
+                    TextField("Email", text: $profileEmail)
+                        .keyboardType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                    TextField("Bio", text: $profileBio, axis: .vertical)
+                        .lineLimit(3, reservesSpace: true)
+                    PhotosPicker(selection: $profilePhotoPickerItem, matching: .images) {
+                        Label("Choose Photo", systemImage: "photo")
+                    }
+                }
+            }
+            .navigationTitle("Profile")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showProfileEditSheet = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { saveProfileEdits() }
+                        .disabled(profileDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private var goalSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Goal") {
+                    TextField("Title", text: $goalTitle)
+                    TextField("Target amount", text: $goalTargetAmount)
+                        .keyboardType(.decimalPad)
+                    TextField("Current amount", text: $goalCurrentAmount)
+                        .keyboardType(.decimalPad)
+                    DatePicker("Due date", selection: $goalDueDate, displayedComponents: .date)
+                    Toggle("Completed", isOn: $goalIsCompleted)
+                    TextField("Notes", text: $goalNotes, axis: .vertical)
+                        .lineLimit(3, reservesSpace: true)
+                }
+            }
+            .navigationTitle(editingGoal == nil ? "New Goal" : "Edit Goal")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { cancelGoalForm() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { saveGoal() }
+                        .disabled(!canSubmitGoal)
+                }
+            }
+        }
+    }
+
+    private var achievementSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Achievement") {
+                    TextField("Title", text: $achievementTitle)
+                    TextField("Icon name", text: $achievementIconName)
+                    DatePicker("Achieved on", selection: $achievementDate, displayedComponents: .date)
+                    TextField("Notes", text: $achievementNotes, axis: .vertical)
+                        .lineLimit(3, reservesSpace: true)
+                }
+            }
+            .navigationTitle(editingAchievement == nil ? "New Achievement" : "Edit Achievement")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { cancelAchievementForm() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { saveAchievement() }
+                        .disabled(achievementTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
     private var filterControl: some View {
         Picker("Filter", selection: $selectedFilter) {
             ForEach(Filter.allCases) { f in
@@ -922,6 +1342,335 @@ struct ContentView: View {
         newAmount = ""
         newKind = .expense
         newCategory = .other
+    }
+
+    private func transactionRow(_ tx: Transaction) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill((tx.kind == .expense ? Color.red : Color.green).opacity(0.15))
+                Image(systemName: tx.kind == .expense ? "arrow.up" : "arrow.down")
+                    .foregroundStyle(tx.kind == .expense ? .red : .green)
+            }
+            .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(tx.title)
+                    .font(.headline)
+                    .foregroundColor(themedTextColor())
+                Text(tx.date, style: .date)
+                    .font(.caption)
+                    .foregroundColor(forcesWhiteText ? .white : themedTextColor().opacity(0.8))
+                Text(tx.category.rawValue)
+                    .font(.caption2)
+                    .foregroundColor(themedTextColor())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(paletteColors(for: selectedDesign).first?.opacity(0.12) ?? Color.secondary.opacity(0.15), in: Capsule())
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 6) {
+                Text((tx.kind == .expense ? -tx.amount : tx.amount), format: .currency(code: Locale.current.currency?.identifier ?? "USD"))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(designTextColor(tx.kind == .expense ? .red : .green))
+                    .blur(radius: shouldBlurAmounts ? 8 : 0)
+                Button {
+                    beginEdit(tx)
+                } label: {
+                    Image(systemName: "pencil.circle.fill")
+                        .font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Edit transaction")
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(paletteColors(for: selectedDesign).first?.opacity(selectedTheme == .dark ? 0.12 : 0.06) ?? Color(.secondarySystemBackground))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(tx.title), \(tx.kind.rawValue), amount \(tx.amount)")
+    }
+
+    private var profileAvatar: some View {
+        Group {
+            if let data = profile.photoData, let uiImage = UIImage(data: data) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    Circle().fill(accentColor(for: selectedDesign).opacity(0.20))
+                    Text(profile.displayName.isEmpty ? "U" : String(profile.displayName.prefix(1)).uppercased())
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundStyle(accentColor(for: selectedDesign))
+                }
+            }
+        }
+        .frame(width: 72, height: 72)
+        .clipShape(Circle())
+        .overlay(Circle().stroke(Color.white.opacity(0.7), lineWidth: 2))
+    }
+
+    private func goalRow(_ goal: GoalItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(goal.title)
+                        .font(.headline)
+                    Text(goal.dueDate, style: .date)
+                        .font(.caption)
+                        .foregroundStyle(designTextColor(.secondary))
+                }
+                Spacer()
+                Button {
+                    beginGoalEdit(goal)
+                } label: {
+                    Image(systemName: "pencil.circle.fill")
+                        .font(.title3)
+                }
+                .buttonStyle(.borderless)
+            }
+
+            ProgressView(value: goal.progress) {
+                Text(goal.isCompleted ? "Completed" : "Progress")
+            } currentValueLabel: {
+                Text(goal.progress, format: .percent.precision(.fractionLength(0)))
+            }
+            .tint(goal.isCompleted ? .green : accentColor(for: selectedDesign))
+
+            HStack {
+                Text(goal.currentAmount, format: .currency(code: Locale.current.currency?.identifier ?? "USD"))
+                Text("/")
+                Text(goal.targetAmount, format: .currency(code: Locale.current.currency?.identifier ?? "USD"))
+            }
+            .font(.caption)
+            .foregroundStyle(designTextColor(.secondary))
+
+            if !goal.notes.isEmpty {
+                Text(goal.notes)
+                    .font(.footnote)
+                    .foregroundStyle(designTextColor(.secondary))
+            }
+
+            HStack {
+                Button(goal.isCompleted ? "Reopen" : "Mark Complete") {
+                    toggleGoalCompletion(goal)
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    deleteGoal(goal)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func achievementRow(_ achievement: AchievementItem) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(accentColor(for: selectedDesign).opacity(0.15))
+                Image(systemName: achievement.iconName)
+                    .foregroundStyle(accentColor(for: selectedDesign))
+            }
+            .frame(width: 44, height: 44)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(achievement.title)
+                    .font(.headline)
+                Text(achievement.achievedOn, style: .date)
+                    .font(.caption)
+                    .foregroundStyle(designTextColor(.secondary))
+                if !achievement.notes.isEmpty {
+                    Text(achievement.notes)
+                        .font(.footnote)
+                        .foregroundStyle(designTextColor(.secondary))
+                }
+            }
+
+            Spacer()
+
+            Button {
+                beginAchievementEdit(achievement)
+            } label: {
+                Image(systemName: "pencil.circle.fill")
+                    .font(.title3)
+            }
+            .buttonStyle(.borderless)
+
+            Button(role: .destructive) {
+                deleteAchievement(achievement)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func loadProfileEditor() {
+        profileDisplayName = profile.displayName
+        profileEmail = profile.email
+        profileBio = profile.bio
+    }
+
+    private func saveProfileEdits() {
+        profile.displayName = profileDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.email = profileEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.bio = profileBio.trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.saveProfile(profile)
+        showProfileEditSheet = false
+    }
+
+    private func loadProfilePhoto(from item: PhotosPickerItem) async {
+        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
+        await MainActor.run {
+            profile.photoData = data
+            Self.saveProfile(profile)
+        }
+    }
+
+    private func prepareNewGoal() {
+        editingGoal = nil
+        goalTitle = ""
+        goalTargetAmount = ""
+        goalCurrentAmount = ""
+        goalDueDate = .now
+        goalNotes = ""
+        goalIsCompleted = false
+    }
+
+    private var canSubmitGoal: Bool {
+        guard !goalTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard let target = Double(goalTargetAmount.replacingOccurrences(of: ",", with: ".")), target > 0 else { return false }
+        guard let current = Double(goalCurrentAmount.replacingOccurrences(of: ",", with: ".")), current >= 0 else { return false }
+        return target.isFinite && current.isFinite
+    }
+
+    private func saveGoal() {
+        guard let target = Double(goalTargetAmount.replacingOccurrences(of: ",", with: ".")), target > 0 else { return }
+        guard let current = Double(goalCurrentAmount.replacingOccurrences(of: ",", with: ".")), current >= 0 else { return }
+        let normalizedCompleted = goalIsCompleted || current >= target
+        let updated = GoalItem(
+            id: editingGoal?.id ?? UUID(),
+            title: goalTitle.trimmingCharacters(in: .whitespacesAndNewlines),
+            targetAmount: target,
+            currentAmount: min(current, target),
+            dueDate: goalDueDate,
+            notes: goalNotes.trimmingCharacters(in: .whitespacesAndNewlines),
+            isCompleted: normalizedCompleted
+        )
+
+        if let existing = editingGoal, let idx = goals.firstIndex(where: { $0.id == existing.id }) {
+            goals[idx] = updated
+        } else {
+            goals.insert(updated, at: 0)
+        }
+
+        Self.saveGoals(goals)
+        cancelGoalForm()
+    }
+
+    private func cancelGoalForm() {
+        showGoalForm = false
+        editingGoal = nil
+        goalTitle = ""
+        goalTargetAmount = ""
+        goalCurrentAmount = ""
+        goalDueDate = .now
+        goalNotes = ""
+        goalIsCompleted = false
+    }
+
+    private func beginGoalEdit(_ goal: GoalItem) {
+        editingGoal = goal
+        goalTitle = goal.title
+        goalTargetAmount = String(goal.targetAmount)
+        goalCurrentAmount = String(goal.currentAmount)
+        goalDueDate = goal.dueDate
+        goalNotes = goal.notes
+        goalIsCompleted = goal.isCompleted
+        showGoalForm = true
+    }
+
+    private func toggleGoalCompletion(_ goal: GoalItem) {
+        guard let idx = goals.firstIndex(where: { $0.id == goal.id }) else { return }
+        goals[idx].isCompleted.toggle()
+        if goals[idx].isCompleted {
+            goals[idx].currentAmount = max(goals[idx].currentAmount, goals[idx].targetAmount)
+        }
+        Self.saveGoals(goals)
+    }
+
+    private func deleteGoal(_ goal: GoalItem) {
+        goals.removeAll { $0.id == goal.id }
+        Self.saveGoals(goals)
+    }
+
+    private func prepareNewAchievement() {
+        editingAchievement = nil
+        achievementTitle = ""
+        achievementIconName = "trophy.fill"
+        achievementDate = .now
+        achievementNotes = ""
+    }
+
+    private func beginAchievementEdit(_ achievement: AchievementItem) {
+        editingAchievement = achievement
+        achievementTitle = achievement.title
+        achievementIconName = achievement.iconName
+        achievementDate = achievement.achievedOn
+        achievementNotes = achievement.notes
+        showAchievementForm = true
+    }
+
+    private func saveAchievement() {
+        let updated = AchievementItem(
+            id: editingAchievement?.id ?? UUID(),
+            title: achievementTitle.trimmingCharacters(in: .whitespacesAndNewlines),
+            iconName: achievementIconName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "trophy.fill" : achievementIconName.trimmingCharacters(in: .whitespacesAndNewlines),
+            achievedOn: achievementDate,
+            notes: achievementNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+
+        if let existing = editingAchievement, let idx = achievements.firstIndex(where: { $0.id == existing.id }) {
+            achievements[idx] = updated
+        } else {
+            achievements.insert(updated, at: 0)
+        }
+
+        Self.saveAchievements(achievements)
+        cancelAchievementForm()
+    }
+
+    private func cancelAchievementForm() {
+        showAchievementForm = false
+        editingAchievement = nil
+        achievementTitle = ""
+        achievementIconName = "trophy.fill"
+        achievementDate = .now
+        achievementNotes = ""
+    }
+
+    private func deleteAchievement(_ achievement: AchievementItem) {
+        achievements.removeAll { $0.id == achievement.id }
+        Self.saveAchievements(achievements)
+    }
+
+    private func deleteTransactions(at offsets: IndexSet, from source: [Transaction]) {
+        let idsToDelete = Set(offsets.compactMap { index in
+            source.indices.contains(index) ? source[index].id : nil
+        })
+        transactions.removeAll { idsToDelete.contains($0.id) }
+        Self.saveTransactions(transactions)
     }
 }
 
